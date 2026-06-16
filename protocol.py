@@ -48,7 +48,7 @@ from crypto_utils import (
 )
 from messages import ClientFinished, ClientHello, GatewayFinished, GatewayHello
 from metrics import Metrics, OpTimer
-from primitives import get_dh_scheme, get_kem_scheme
+from primitives import get_dh_scheme, get_kem_scheme, get_sig_scheme
 from wire import recv_msg, send_msg
 
 CONTEXT = b"hybrid-pq-migration-v1"
@@ -57,6 +57,25 @@ GATEWAY_ID = "gateway-1"
 CLIENT_ID = "client-1"
 CLIENT_VERSION = "1"
 NONCE_LEN = 16
+
+
+class GatewayIdentity:
+    """
+    网关长期签名身份（信任锚）。pq-auth 模式下，网关用其长期私钥对
+    (ClientHello || GatewayHello) 签名，客户端用预置（pinned）的网关公钥验证，
+    从而把 gateway_authenticator 从“密钥确认”升级为“真身份认证”，抵抗冒充网关的主动中间人。
+    """
+
+    def __init__(self, scheme, priv, pub: bytes) -> None:
+        self.scheme = scheme
+        self.priv = priv
+        self.pub = pub
+
+    @staticmethod
+    def generate() -> "GatewayIdentity":
+        scheme, _ = get_sig_scheme()
+        priv, pub = scheme.keygen()
+        return GatewayIdentity(scheme, priv, pub)
 
 
 # --------------------------------------------------------------------------- #
@@ -123,8 +142,10 @@ def _auth_bind(mode: str, algs: List[str], g_nonce: bytes, c_nonce: bytes) -> by
 # --------------------------------------------------------------------------- #
 # 网关侧：处理单个连接
 # --------------------------------------------------------------------------- #
-def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str]) -> Dict:
-    """处理一次握手；返回网关侧结果字典。失败时关闭连接并返回 success=False。"""
+def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str],
+                              identity: Optional["GatewayIdentity"] = None) -> Dict:
+    """处理一次握手；返回网关侧结果字典。失败时关闭连接并返回 success=False。
+    identity 非空时启用 pq-auth：用网关长期私钥对握手签名（gateway_authenticator 为签名）。"""
     timer = OpTimer()
     dh, _ = get_dh_scheme()
     kem, _ = get_kem_scheme()
@@ -133,6 +154,7 @@ def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str])
 
     # 1) 接收 ClientHello
     payload, _ = recv_msg(conn)
+    ch_bytes = payload
     with timer.time("deserialize"):
         ch = ClientHello.deserialize(payload)
     transcript.update(payload)  # 喂入“网关实际收到的字节”
@@ -173,7 +195,6 @@ def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str])
     g_nonce = os.urandom(NONCE_LEN)
     with timer.time("mac"):
         downgrade_field = hmac_sha256(early_key, _downgrade_bind(ch.supported_algorithms, ch.client_version))
-        authenticator = hmac_sha256(auth_key, _auth_bind(mode, nres.selected_algorithms, g_nonce, ch.client_nonce))
 
     gh = GatewayHello(
         gateway_id=GATEWAY_ID,
@@ -183,8 +204,18 @@ def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str])
         gateway_dh_public_key=gw_dh_pub,
         pq_ciphertext=pq_ct,
         downgrade_protection_field=downgrade_field,
-        gateway_authenticator=authenticator,
+        gateway_authenticator=b"",          # 先占位，下面据模式填 MAC 或签名
     )
+    if identity is not None:
+        # pq-auth：对 (ClientHello || GatewayHello[authenticator 置空]) 做后量子签名
+        tbs = ch_bytes + gh.serialize()
+        with timer.time("sig_sign"):
+            gh.gateway_authenticator = identity.scheme.sign(identity.priv, tbs)
+    else:
+        # 默认：基于握手密钥的 MAC（仅密钥确认，不认证身份）
+        with timer.time("mac"):
+            gh.gateway_authenticator = hmac_sha256(
+                auth_key, _auth_bind(mode, nres.selected_algorithms, g_nonce, ch.client_nonce))
     with timer.time("serialize"):
         gh_bytes = gh.serialize()
     send_msg(conn, gh_bytes)
@@ -240,6 +271,8 @@ def client_handshake(
     client_supported: List[str],
     mitm: Optional[Callable[[ClientHello], ClientHello]] = None,
     _skip_negotiation_checks: bool = False,
+    expected_gw_pub: Optional[bytes] = None,
+    gw_sig_scheme=None,
 ) -> Dict:
     """
     发起一次握手；返回客户端侧结果字典（含通信开销与计算开销）。
@@ -336,13 +369,24 @@ def client_handshake(
         #    中间人不知道 early_key（由握手秘密派生），无法伪造正确字段。
         with timer.time("mac"):
             expect_dg = hmac_sha256(early_key, _downgrade_bind(advertised, CLIENT_VERSION))
-            expect_auth = hmac_sha256(auth_key, _auth_bind(mode_sel, gh.selected_algorithms,
-                                                           gh.gateway_nonce, c_nonce))
         if not _skip_negotiation_checks:
             if not constant_time_eq(expect_dg, gh.downgrade_protection_field):
                 raise _HandshakeFailure("降级保护校验失败：算法列表疑似被中间人篡改/裁剪")
-            if not constant_time_eq(expect_auth, gh.gateway_authenticator):
-                raise _HandshakeFailure("gateway_authenticator 校验失败")
+            if expected_gw_pub is not None:
+                # pq-auth：用预置的网关长期公钥验证签名（认证网关身份，抵抗冒充）
+                gh_nosig = GatewayHello(**{**gh.__dict__, "gateway_authenticator": b""}).serialize()
+                tbs = ch_bytes + gh_nosig
+                with timer.time("sig_verify"):
+                    sig_ok = gw_sig_scheme.verify(expected_gw_pub, tbs, gh.gateway_authenticator)
+                if not sig_ok:
+                    raise _HandshakeFailure("网关签名验证失败：身份不可信（疑似冒充网关）")
+            else:
+                # 默认：校验基于握手密钥的 MAC（仅密钥确认，不认证身份）
+                with timer.time("mac"):
+                    expect_auth = hmac_sha256(auth_key, _auth_bind(mode_sel, gh.selected_algorithms,
+                                                                   gh.gateway_nonce, c_nonce))
+                if not constant_time_eq(expect_auth, gh.gateway_authenticator):
+                    raise _HandshakeFailure("gateway_authenticator 校验失败")
 
         # 6) TH1 = SHA256(ClientHello || GatewayHello)，作为会话密钥的 salt（信道绑定）。
         with timer.time("transcript_hash"):
@@ -413,8 +457,10 @@ class _HandshakeFailure(Exception):
 class GatewayServer:
     """持久 TCP 服务端：循环 accept，每个连接跑一次握手，结果推入队列。"""
 
-    def __init__(self, host: str, port: int, gateway_supported: List[str]) -> None:
+    def __init__(self, host: str, port: int, gateway_supported: List[str],
+                 identity: Optional["GatewayIdentity"] = None) -> None:
         self.gateway_supported = gateway_supported
+        self.identity = identity          # 非空则启用 pq-auth（网关对握手签名）
         self.results: "Queue[Dict]" = Queue()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -432,7 +478,7 @@ class GatewayServer:
                 break
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
-                res = gateway_handle_connection(conn, self.gateway_supported)
+                res = gateway_handle_connection(conn, self.gateway_supported, identity=self.identity)
             except Exception as e:  # 任何异常都不应让服务器崩溃
                 res = {"success": False, "selected_mode": "failed", "warnings": [],
                        "session_key": b"", "gateway_compute_ms": 0.0,
@@ -525,14 +571,21 @@ def run_handshake(
     gateway_supported_algs: List[str],
     host: str = "127.0.0.1",
     mitm: Optional[Callable[[ClientHello], ClientHello]] = None,
+    authenticate: bool = False,
 ) -> HandshakeResult:
     """
     单次握手编排：在临时端口拉起网关线程，客户端连 localhost 跑通四步，
     合并双方 metrics 后返回 HandshakeResult。
+    authenticate=True 时启用 pq-auth：网关生成长期 ML-DSA 身份并签名，
+    客户端用 pinned 公钥验证（演示对“真身份认证”的支持）。
     """
-    server = GatewayServer(host, 0, gateway_supported_algs).start()
+    identity = GatewayIdentity.generate() if authenticate else None
+    exp_pub = identity.pub if identity else None
+    exp_scheme = identity.scheme if identity else None
+    server = GatewayServer(host, 0, gateway_supported_algs, identity=identity).start()
     try:
-        client = client_handshake(host, server.port, mode, client_supported_algs, mitm=mitm)
+        client = client_handshake(host, server.port, mode, client_supported_algs, mitm=mitm,
+                                  expected_gw_pub=exp_pub, gw_sig_scheme=exp_scheme)
         try:
             gateway = server.results.get(timeout=5)
         except Exception:

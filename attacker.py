@@ -284,6 +284,91 @@ def print_attack_report(result: Dict) -> None:
     print()
 
 
+# --------------------------------------------------------------------------- #
+# 冒充网关攻击：身份认证（pq-auth）前后对比
+# --------------------------------------------------------------------------- #
+def run_impersonation_experiment(host: str = "127.0.0.1") -> Dict:
+    """
+    主动中间人“完整冒充网关”：攻击者自己与客户端跑完 DH/KEM（从而掌握会话密钥），
+    冒充成真网关。对比：
+      A) 现有协议（无身份认证）：客户端只做 MAC 密钥确认 -> 冒充得逞（success=True）。
+      B) pq-auth：攻击者用自己的(非法)长期密钥签名，客户端用 pinned 真网关公钥验签 -> 验签失败，冒充被挡。
+    另有正常对照 C：真网关 + pq-auth -> 握手成功。
+    """
+    import negotiation as neg
+    from protocol import GatewayIdentity, GatewayServer, client_handshake
+
+    legit = GatewayIdentity.generate()   # 受信任的真网关长期身份（信任锚）
+    pinned = legit.pub
+    scheme = legit.scheme
+
+    def one(identity, expected_pub):
+        srv = GatewayServer(host, 0, neg.ALL_MODES, identity=identity).start()
+        cres = client_handshake(host, srv.port, "hybrid", neg.ALL_MODES,
+                                expected_gw_pub=expected_pub,
+                                gw_sig_scheme=(scheme if expected_pub else None))
+        try:
+            gres = srv.results.get(timeout=5)
+        except Exception:
+            gres = {}
+        srv.stop()
+        return cres, gres
+
+    rows = []
+    # A) 现有协议（无认证）：攻击者冒充网关，客户端 MAC 校验通过 -> 冒充得逞
+    a_c, _ = one(identity=None, expected_pub=None)
+    rows.append(dict(scenario="no auth (current protocol)", gw_auth="MAC (key confirmation)",
+                     client_success=a_c["success"], detected=not a_c["success"],
+                     gh_bytes=a_c["per_message_bytes"].get("GatewayHello", 0)))
+    # B) pq-auth：攻击者用自己的(非法)长期密钥签名 -> 客户端验签失败
+    impostor = GatewayIdentity.generate()
+    b_c, _ = one(identity=impostor, expected_pub=pinned)
+    rows.append(dict(scenario="pq-auth (ML-DSA signature)", gw_auth="ML-DSA signature",
+                     client_success=b_c["success"], detected=not b_c["success"],
+                     gh_bytes=b_c["per_message_bytes"].get("GatewayHello", 0)))
+    # C) 正常对照：真网关 + pq-auth
+    c_c, c_g = one(identity=legit, expected_pub=pinned)
+
+    overhead = {
+        "scheme": scheme.name,
+        "sig_sign_ms": c_g.get("gateway_ops", {}).get("sig_sign", 0.0),
+        "sig_verify_ms": c_c.get("client_ops", {}).get("sig_verify", 0.0),
+        "gh_bytes_noauth": rows[0]["gh_bytes"],
+        "gh_bytes_pqauth": c_c["per_message_bytes"].get("GatewayHello", 0),
+        "legit_success": c_c["success"],
+    }
+    return {"rows": rows, "overhead": overhead}
+
+
+def print_impersonation_report(result: Dict) -> None:
+    rows = result["rows"]
+    ov = result["overhead"]
+    print("=" * 78)
+    print("冒充网关攻击：后量子身份认证（pq-auth, ML-DSA）前后对比")
+    print("=" * 78)
+    print("威胁：主动攻击者完整冒充网关，自己与客户端跑完 DH/KEM、掌握会话密钥。\n")
+
+    hdr = f"{'scenario':<30}{'gateway_auth':<24}{'client_success':<16}{'impersonation_detected'}"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in rows:
+        flag = "YES (secure)" if r["detected"] else "NO (vulnerable)"
+        print(f"{r['scenario']:<30}{r['gw_auth']:<24}{str(r['client_success']):<16}{flag}")
+    print()
+    print(f"正常对照（真网关 + pq-auth）握手成功：{ov['legit_success']}（认证未破坏合法握手）\n")
+
+    print(f"== 身份认证开销（{ov['scheme']}）==")
+    print(f"  网关签名 sig_sign   : {ov['sig_sign_ms']:.3f} ms")
+    print(f"  客户端验签 sig_verify: {ov['sig_verify_ms']:.3f} ms")
+    print(f"  GatewayHello 字节   : 无认证 {ov['gh_bytes_noauth']} B  ->  pq-auth {ov['gh_bytes_pqauth']} B "
+          f"(+{ov['gh_bytes_pqauth'] - ov['gh_bytes_noauth']} B，主要为 ML-DSA 签名 ~3309 B)")
+    print()
+    print("结论：现有协议无长期身份，冒充网关得逞（vulnerable）；引入 ML-DSA 长期签名后，")
+    print("      攻击者无网关私钥、签名验不过，冒充被挡（secure），代价为单次签名/验签约数毫秒 + 约 3.3 KB 报文。")
+    print()
+
+
 if __name__ == "__main__":
     print_attack_report(run_attack_suite())
     run_defense_in_depth()
+    print_impersonation_report(run_impersonation_experiment())

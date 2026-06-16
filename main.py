@@ -177,6 +177,14 @@ def cmd_group(args: argparse.Namespace) -> None:
         group.print_group_report(group.run_group_experiment())
 
 
+def cmd_auth(args: argparse.Namespace) -> None:
+    import attacker
+    with _save_output("auth"):
+        _print_primitives()
+        print()
+        attacker.print_impersonation_report(attacker.run_impersonation_experiment())
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="简化版客户端—网关抗量子迁移握手协议")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -211,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gr = sub.add_parser("group", help="任务五：动态群组密钥迁移（LKH 树）实验")
     gr.set_defaults(func=cmd_group)
+
+    au = sub.add_parser("auth", help="创新扩展：pq-auth 后量子身份认证，冒充网关前后对比")
+    au.set_defaults(func=cmd_auth)
 
     return p
 

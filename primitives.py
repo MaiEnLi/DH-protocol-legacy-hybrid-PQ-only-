@@ -64,6 +64,24 @@ class KEMScheme(abc.ABC):
         """用本端私钥解封装密文，返回共享密钥字节。"""
 
 
+class SignatureScheme(abc.ABC):
+    """数字签名抽象接口（用于网关长期身份认证）。"""
+
+    name: str = "abstract-sig"
+
+    @abc.abstractmethod
+    def keygen(self) -> Tuple[object, bytes]:
+        """返回 (私钥对象, 公钥字节)。"""
+
+    @abc.abstractmethod
+    def sign(self, private: object, message: bytes) -> bytes:
+        """用私钥对消息签名，返回签名字节。"""
+
+    @abc.abstractmethod
+    def verify(self, public: bytes, message: bytes, signature: bytes) -> bool:
+        """用公钥验证签名；通过返回 True，否则 False（不抛异常）。"""
+
+
 # --------------------------------------------------------------------------- #
 # Toy 实现（仅模拟，不具真实安全性）
 # --------------------------------------------------------------------------- #
@@ -240,6 +258,75 @@ _HAVE_REAL_KEM = len(_REAL_KEM_FACTORIES) > 0
 
 
 # --------------------------------------------------------------------------- #
+# 数字签名后端（用于网关长期身份认证）：ML-DSA(quantcrypt) > Ed25519(经典回退)
+# --------------------------------------------------------------------------- #
+_REAL_SIG_FACTORIES: list = []
+
+# 后端 1：真实后量子签名 ML-DSA-65（Dilithium3），来自 quantcrypt
+try:
+    from quantcrypt.dss import MLDSA_65 as _QC_MLDSA65  # type: ignore
+
+    class RealMLDSA(SignatureScheme):
+        """真实后量子签名 ML-DSA-65（FIPS 204）：公钥 1952 B、签名 3309 B。"""
+
+        name = "ml-dsa-65(quantcrypt)"
+        is_pq = True
+
+        def __init__(self) -> None:
+            self._dss = _QC_MLDSA65()
+
+        def keygen(self) -> Tuple[object, bytes]:
+            pk, sk = self._dss.keygen()
+            return sk, pk
+
+        def sign(self, private: object, message: bytes) -> bytes:
+            return self._dss.sign(private, message)
+
+        def verify(self, public: bytes, message: bytes, signature: bytes) -> bool:
+            try:
+                return bool(self._dss.verify(public, message, signature))
+            except Exception:
+                return False
+
+    _REAL_SIG_FACTORIES.append(("ml-dsa-65", RealMLDSA, True))
+except Exception:
+    pass
+
+# 后端 2：经典签名 Ed25519（真实但非抗量子），来自 cryptography —— 仅在无 ML-DSA 时回退
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+        Ed25519PublicKey,
+    )
+
+    class Ed25519DSS(SignatureScheme):
+        """经典 Ed25519 签名（真实实现，但不具备抗量子性）——仅作回退。"""
+
+        name = "ed25519(classical-fallback)"
+        is_pq = False
+
+        def keygen(self) -> Tuple[object, bytes]:
+            priv = Ed25519PrivateKey.generate()
+            return priv, priv.public_key().public_bytes_raw()
+
+        def sign(self, private: object, message: bytes) -> bytes:
+            return private.sign(message)
+
+        def verify(self, public: bytes, message: bytes, signature: bytes) -> bool:
+            try:
+                Ed25519PublicKey.from_public_bytes(public).verify(signature, message)
+                return True
+            except Exception:
+                return False
+
+    _REAL_SIG_FACTORIES.append(("ed25519", Ed25519DSS, False))
+except Exception:
+    pass
+
+_HAVE_SIG = len(_REAL_SIG_FACTORIES) > 0
+
+
+# --------------------------------------------------------------------------- #
 # 工厂：自动选择真实 / toy
 # --------------------------------------------------------------------------- #
 def _force_toy() -> bool:
@@ -262,15 +349,26 @@ def get_kem_scheme() -> Tuple[KEMScheme, bool]:
     return ToyKEM(), False
 
 
+def get_sig_scheme() -> Tuple[SignatureScheme, bool]:
+    """返回 (签名方案实例, 是否为后量子)。优先 ML-DSA，否则回退经典 Ed25519。"""
+    if not _HAVE_SIG:
+        raise RuntimeError("无可用签名后端（需 quantcrypt 或 cryptography）")
+    _, cls, is_pq = _REAL_SIG_FACTORIES[0]
+    return cls(), is_pq
+
+
 def primitive_info() -> dict:
     """汇总当前生效的原语信息，供运行时打印与报告记录。"""
     dh, dh_real = get_dh_scheme()
     kem, kem_real = get_kem_scheme()
+    sig, sig_pq = get_sig_scheme()
     return {
         "dh_name": dh.name,
         "dh_is_real": dh_real,
         "kem_name": kem.name,
         "kem_is_real": kem_real,
+        "sig_name": sig.name,
+        "sig_is_pq": sig_pq,
     }
 
 
@@ -279,3 +377,4 @@ if __name__ == "__main__":
     print("当前密码原语：")
     print(f"  DH  : {info['dh_name']}  ({'真实库' if info['dh_is_real'] else 'toy(不安全)'})")
     print(f"  KEM : {info['kem_name']} ({'真实库' if info['kem_is_real'] else 'toy(不安全)'})")
+    print(f"  SIG : {info['sig_name']} ({'后量子' if info['sig_is_pq'] else '经典回退'})")

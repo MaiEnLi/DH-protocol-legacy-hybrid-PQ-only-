@@ -104,6 +104,25 @@ class TestMitmAttacks(unittest.TestCase):
             self.assertIn(required, names)
 
 
+class TestPqAuthImpersonation(unittest.TestCase):
+    """创新扩展：pq-auth 应挡住冒充网关，且不破坏合法握手。"""
+
+    def test_legit_pq_auth_succeeds(self):
+        r = run_handshake("hybrid", ALL, ALL, authenticate=True)
+        self.assertTrue(r.success, "真网关 + pq-auth 应握手成功")
+        self.assertEqual(r.client_session_key, r.gateway_session_key)
+
+    def test_impersonation_blocked_by_pq_auth(self):
+        import attacker
+        res = attacker.run_impersonation_experiment()
+        by = {r["scenario"]: r for r in res["rows"]}
+        # 无认证：冒充得逞（未检测）
+        self.assertFalse(by["no auth (current protocol)"]["detected"])
+        # pq-auth：冒充被挡（检测到）
+        self.assertTrue(by["pq-auth (ML-DSA signature)"]["detected"])
+        self.assertTrue(res["overhead"]["legit_success"])
+
+
 class TestGroupKeyTree(unittest.TestCase):
     """任务五：对称 LKH 树——一致性、前向安全、对数级开销。"""
 

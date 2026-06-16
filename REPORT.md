@@ -324,6 +324,34 @@ group_init 时间含 n 次握手、member_join 含 1 次新成员握手、member
 8. **对数级增长**：member_join / member_leave 的更新节点数与广播消息数随 n 呈 **O(log n)**，
    而 group_init 呈 O(n)——印证二叉密钥树把 rekey 开销从线性降到对数，这正是用树（而非“直接逐个分发”）的意义。
 
+### 6.6 创新扩展：后量子身份认证（pq-auth，挡住冒充网关）
+
+§4.4 与 §8 指出本协议最大短板：无长期身份，`gateway_authenticator` 仅为密钥确认，
+**挡不住完整冒充网关的主动中间人**。为闭环该缺口，新增可选的 **pq-auth** 模式：
+给网关一个长期 **ML-DSA-65（Dilithium3，FIPS 204）** 签名密钥对，网关用长期私钥对
+`(ClientHello ∥ GatewayHello)` 签名（写入 `gateway_authenticator`），客户端用**预置（pinned）的
+网关公钥**验证——把"密钥确认"升级为"身份认证"。命令：`python main.py auth`。
+
+威胁模型：主动攻击者完整冒充网关，自己与客户端跑完 DH/KEM、从而掌握会话密钥。前后对比：
+
+| scenario | gateway_auth | client_success | impersonation_detected |
+|----------|--------------|:--------------:|:----------------------:|
+| no auth (current protocol) | MAC（密钥确认） | True  | NO（vulnerable）|
+| pq-auth (ML-DSA signature) | ML-DSA 签名     | False | YES（secure）|
+
+> 无认证时客户端无法分辨真假网关，冒充得逞（success=True）；引入 pq-auth 后，攻击者无网关长期私钥、
+> 签名验不过，握手中止（success=False），冒充被挡。正常对照（真网关 + pq-auth）握手成功，
+> 说明认证未破坏合法连接。
+
+**迁移成本**（ML-DSA-65）：网关签名约 1.3–2.7 ms、客户端验签约 0.6–0.8 ms；
+GatewayHello 由 1303 B 增至约 4580 B（**+约 3.3 KB**，即一枚 ML-DSA 签名 3309 B）。
+这正体现"抗量子迁移"中身份认证一环的代价：后量子签名比经典签名（Ed25519 64 B）大一到两个数量级，
+是 PQ 迁移通信开销的又一主要来源。
+
+**说明**：pq-auth 与 legacy/hybrid/pq-only 的密钥协商正交——它认证的是"网关是谁"，
+而非"用哪种 KEX"。`primitives.py` 以 `SignatureScheme` 抽象，按 `ML-DSA(quantcrypt) > Ed25519(经典回退)`
+自动选用；signing 用真实 ML-DSA。
+
 ---
 
 ## 7. 原语声明与可加分项
@@ -341,8 +369,9 @@ group_init 时间含 n 次握手、member_join 含 1 次新成员握手、member
 
 ## 8. 已知简化与局限
 
-1. **缺长期身份认证**：无证书/PSK，`gateway_authenticator` 只是密钥确认，**无法抵抗能完整
-   冒充网关的主动中间人**（见 §4.4）。真实系统需引入 PKI 或预共享密钥。
+1. **长期身份认证（已由可选 pq-auth 部分闭环）**：默认模式下 `gateway_authenticator` 只是密钥确认，
+   无法抵抗完整冒充网关的主动中间人（见 §4.4）。§6.6 新增的 pq-auth 模式用 ML-DSA 长期签名挡住了该攻击；
+   但仍依赖"客户端预置网关公钥（pinning）"这一信任锚，未实现完整 PKI / 证书链 / 吊销，也未对客户端做认证（单向认证）。
 2. **重放检测靠密钥新鲜性、而非专门的抗重放状态**：实验 §6.4 中重放旧 ClientHello/GatewayHello
    均被检出，但其根因是每次握手 nonce 与 DH/KEM 临时密钥都新鲜，重放导致双方密钥不一致而失败；
    协议本身未维护“已见 nonce 集合”或时间戳窗口。若需在更复杂场景（如带长期密钥的会话恢复）下
