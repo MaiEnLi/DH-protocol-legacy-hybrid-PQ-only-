@@ -183,6 +183,7 @@ def cmd_auth(args: argparse.Namespace) -> None:
         _print_primitives()
         print()
         attacker.print_impersonation_report(attacker.run_impersonation_experiment())
+        attacker.print_mutual_auth_report(attacker.run_mutual_auth_experiment())
 
 
 def cmd_mitm(args: argparse.Namespace) -> None:

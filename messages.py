@@ -101,12 +101,15 @@ class GatewayHello:
 class ClientFinished:
     transcript_hash: bytes
     client_finished_mac: bytes
+    # 双向认证（mutual pq-auth）时携带客户端长期签名；默认空（仅密钥确认 MAC）。
+    client_authenticator: bytes = b""
 
     def serialize(self) -> bytes:
         return (
             w_str(MSG_CLIENT_FINISHED)
             + w_bytes(self.transcript_hash)
             + w_bytes(self.client_finished_mac)
+            + w_bytes(self.client_authenticator)
         )
 
     @staticmethod
@@ -116,6 +119,7 @@ class ClientFinished:
         return ClientFinished(
             transcript_hash=r.r_bytes(),
             client_finished_mac=r.r_bytes(),
+            client_authenticator=r.r_bytes(),
         )
 
 

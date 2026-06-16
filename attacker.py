@@ -417,7 +417,66 @@ def print_impersonation_report(result: Dict) -> None:
     print()
 
 
+# --------------------------------------------------------------------------- #
+# 双向认证（mutual pq-auth）：非法客户端被网关拒绝
+# --------------------------------------------------------------------------- #
+def run_mutual_auth_experiment(host: str = "127.0.0.1") -> Dict:
+    """
+    双向认证下，网关用预置的合法客户端公钥验证 ClientFinished 中的客户端签名。
+    对比三种客户端：合法（持正确长期密钥）、冒充（错误密钥）、未认证（不带签名）。
+    """
+    import negotiation as neg
+    from protocol import GatewayIdentity, GatewayServer, client_handshake
+
+    gw = GatewayIdentity.generate()             # 网关长期身份
+    client_legit = GatewayIdentity.generate()   # 合法客户端身份（网关 pin 其公钥）
+    impostor = GatewayIdentity.generate()       # 冒充者的非法长期身份
+
+    def run(client_id) -> bool:
+        srv = GatewayServer(host, 0, neg.ALL_MODES, identity=gw,
+                            client_pub=client_legit.pub, client_sig_scheme=client_legit.scheme).start()
+        res = client_handshake(host, srv.port, "hybrid", neg.ALL_MODES,
+                               expected_gw_pub=gw.pub, gw_sig_scheme=gw.scheme,
+                               client_identity=client_id)
+        try:
+            srv.results.get(timeout=5)
+        except Exception:
+            pass
+        srv.stop()
+        return res["success"]
+
+    return {
+        "legit": run(client_legit),       # 合法客户端 -> 应成功
+        "impostor": run(impostor),        # 错误长期密钥 -> 应被拒
+        "unauth": run(None),              # 不带签名 -> 应被拒
+    }
+
+
+def print_mutual_auth_report(result: Dict) -> None:
+    print("=" * 78)
+    print("双向认证（mutual pq-auth）：网关对客户端身份的认证")
+    print("=" * 78)
+    print("网关预置合法客户端公钥，验证 ClientFinished 中的客户端 ML-DSA 签名。\n")
+    print(f"{'客户端类型':<28}{'握手结果':<12}{'是否被网关接受'}")
+    print("-" * 60)
+    rows = [
+        ("合法客户端(正确长期密钥)", result["legit"]),
+        ("冒充客户端(错误长期密钥)", result["impostor"]),
+        ("未认证客户端(不带签名)", result["unauth"]),
+    ]
+    for name, ok in rows:
+        print(f"{name:<28}{('success' if ok else 'fail'):<12}{'接受' if ok else '拒绝'}")
+    print()
+    secure = result["legit"] and not result["impostor"] and not result["unauth"]
+    print(f"结论：仅持正确长期密钥的客户端被接受，冒充与未认证客户端均被拒绝 —— "
+          f"双向认证{'成立' if secure else '异常'}。")
+    print("代价：客户端额外一次 ML-DSA 签名、网关额外一次验签（各约数毫秒），")
+    print("      ClientFinished 增加约 3.3 KB（一枚 ML-DSA 签名）。")
+    print()
+
+
 if __name__ == "__main__":
     print_attack_report(run_attack_suite())
     run_defense_in_depth()
     print_impersonation_report(run_impersonation_experiment())
+    print_mutual_auth_report(run_mutual_auth_experiment())
