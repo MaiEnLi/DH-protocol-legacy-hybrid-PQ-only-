@@ -46,14 +46,14 @@ class Attacker:
     def __init__(self, gateway_host: str, gateway_port: int,
                  tamper: Optional[Dict[str, TamperFn]] = None,
                  record: Optional[Dict[str, bytes]] = None,
-                 host: str = "127.0.0.1") -> None:
+                 host: str = "127.0.0.1", listen_port: int = 0) -> None:
         self.gw_host = gateway_host
         self.gw_port = gateway_port
         self.tamper = tamper or {}
         self.record = record
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, 0))
+        self._sock.bind((host, listen_port))
         self._sock.listen(8)
         self.host, self.port = self._sock.getsockname()
         self._running = False
@@ -127,6 +127,32 @@ class Attacker:
         if self._thread:
             self._thread.join(timeout=2)
 
+    def serve_forever(self) -> None:
+        """前台阻塞运行（供独立进程的 mitm 子命令使用），每截获一次握手打印一行。"""
+        self._running = True
+        n = 0
+        try:
+            while True:
+                try:
+                    cconn, addr = self._sock.accept()
+                except OSError:
+                    break
+                n += 1
+                print(f"[MITM] #{n} 截获来自 {addr[0]}:{addr[1]} 的握手，转发至 "
+                      f"{self.gw_host}:{self.gw_port}（施加篡改：{list(self.tamper) or '无(透传)'}）",
+                      flush=True)
+                try:
+                    self._relay_once(cconn)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        cconn.close()
+                    except Exception:
+                        pass
+        except KeyboardInterrupt:
+            print("\n[MITM] 退出。")
+
 
 # --------------------------------------------------------------------------- #
 # 各类篡改策略
@@ -160,6 +186,29 @@ def tamper_replay(old_bytes: bytes) -> TamperFn:
     def f(_raw: bytes) -> bytes:
         return old_bytes
     return f
+
+
+# 独立 mitm 进程支持的（无需跨会话状态的）篡改策略
+LIVE_ATTACKS = {
+    "none": {},
+    "remove_pq_only": {"ClientHello": tamper_remove_alg("pq-only")},
+    "remove_hybrid": {"ClientHello": tamper_remove_alg("hybrid")},
+    "force_legacy": {"GatewayHello": tamper_force_legacy},
+    "replace_downgrade_field": {"GatewayHello": tamper_replace_downgrade},
+}
+
+
+def run_mitm_proxy(listen_host: str, listen_port: int,
+                   gateway_host: str, gateway_port: int, attack: str) -> None:
+    """作为独立进程运行的中间人代理：监听 listen_port，转发至真实网关，并施加指定篡改。
+    重放类攻击需跨会话录制，故仅在 attack 套件内提供；此处支持即时篡改类。"""
+    if attack not in LIVE_ATTACKS:
+        raise ValueError(f"未知攻击类型 {attack}；可选：{list(LIVE_ATTACKS)}")
+    proxy = Attacker(gateway_host, gateway_port, tamper=LIVE_ATTACKS[attack],
+                     host=listen_host, listen_port=listen_port)
+    print(f"[MITM] 监听 {proxy.host}:{proxy.port}  ->  网关 {gateway_host}:{gateway_port}")
+    print(f"[MITM] 攻击类型 = {attack}（Ctrl+C 退出）")
+    proxy.serve_forever()
 
 
 # --------------------------------------------------------------------------- #
