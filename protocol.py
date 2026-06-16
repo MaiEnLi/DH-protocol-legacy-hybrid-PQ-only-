@@ -239,6 +239,7 @@ def client_handshake(
     mode: str,
     client_supported: List[str],
     mitm: Optional[Callable[[ClientHello], ClientHello]] = None,
+    _skip_negotiation_checks: bool = False,
 ) -> Dict:
     """
     发起一次握手；返回客户端侧结果字典（含通信开销与计算开销）。
@@ -246,6 +247,9 @@ def client_handshake(
             具体模式（legacy/hybrid/pq-only）-> 仅公布该模式（fail-closed 冲突策略）。
     - mitm: 测试用钩子，篡改“上线发送”的 ClientHello 副本（模拟中间人），
             但不改变客户端用于 transcript / 降级校验的“原始 ClientHello”。
+    - _skip_negotiation_checks: 仅供“纵深防御”分析实验使用——跳过降级保护字段与
+            gateway_authenticator 两项显式校验，以验证仅凭 transcript / Finished MAC
+            这一层是否仍能检出篡改。生产中绝不应开启。
     """
     timer = OpTimer()
     dh, _ = get_dh_scheme()
@@ -334,10 +338,11 @@ def client_handshake(
             expect_dg = hmac_sha256(early_key, _downgrade_bind(advertised, CLIENT_VERSION))
             expect_auth = hmac_sha256(auth_key, _auth_bind(mode_sel, gh.selected_algorithms,
                                                            gh.gateway_nonce, c_nonce))
-        if not constant_time_eq(expect_dg, gh.downgrade_protection_field):
-            raise _HandshakeFailure("降级保护校验失败：算法列表疑似被中间人篡改/裁剪")
-        if not constant_time_eq(expect_auth, gh.gateway_authenticator):
-            raise _HandshakeFailure("gateway_authenticator 校验失败")
+        if not _skip_negotiation_checks:
+            if not constant_time_eq(expect_dg, gh.downgrade_protection_field):
+                raise _HandshakeFailure("降级保护校验失败：算法列表疑似被中间人篡改/裁剪")
+            if not constant_time_eq(expect_auth, gh.gateway_authenticator):
+                raise _HandshakeFailure("gateway_authenticator 校验失败")
 
         # 6) TH1 = SHA256(ClientHello || GatewayHello)，作为会话密钥的 salt（信道绑定）。
         with timer.time("transcript_hash"):

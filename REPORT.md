@@ -235,6 +235,51 @@ downgrade_protection_field = HMAC(early_key, 客户端 supported_algorithms || c
 3. 双方无共同安全算法时（用例 4）**拒绝连接**（success=False）。
 4. 协议**默认优先更高安全等级**：偏好顺序 `pq-only > hybrid > legacy` 生效（用例 1 选中 pq-only）。
 
+### 6.4 实验三：降级攻击检测（任务四，选做）
+
+本实验用 `attacker.py` 实现的**真实中间人 socket 代理**（坐在 Client 与真实 Gateway 之间，
+在线篡改/重放握手帧）检验降级防护。判定口径：客户端握手未成功（success=False）即视为攻击**被检测到**。
+命令：`python main.py attack`。
+
+| attack_type | detected | 检测依据（首先触发） |
+|-------------|:--------:|----------------------|
+| remove_pq_only            | true | downgrade_protection_field |
+| remove_hybrid             | true | downgrade_protection_field |
+| force_legacy              | true | downgrade_protection_field |
+| replace_downgrade_field   | true | downgrade_protection_field |
+| replay_old_client_hello   | true | downgrade_protection_field |
+| replay_old_gateway_hello（扩展） | true | downgrade_protection_field |
+
+> 无篡改基线（代理透传）握手 success=True，说明代理透明、**无误报**。
+
+**1）哪些攻击被检测到**：题目要求的五种 + 扩展的“重放旧 GatewayHello”，**全部检出**（detected 全为 true）。
+
+**2）检测依据**：本协议有三道相互独立的防线——
+(i) `downgrade_protection_field`（对客户端原始算法列表的 MAC）；
+(ii) `transcript hash`（双方传输文本视图须一致）；
+(iii) `Finished MAC`（密钥确认）。
+客户端收到 GatewayHello 后*最先*做降级保护校验，故六种攻击都在该处首先触发失败。
+究其根因：篡改算法列表使双方该字段不符；篡改 `selected_mode` 或重放使双方共享密钥/`ikm` 不同，
+导致 `early_key` 不同、降级字段对不上。
+
+为**实证三道防线相互独立**，做了**纵深防御对比实验**（`run_defense_in_depth`）：
+人为关闭“降级字段 + 认证符”这一层后，仅凭 `transcript hash` / `Finished MAC` **仍然全部检出**：
+
+| attack_type | 完整防护 | 仅 transcript/Finished |
+|-------------|:--------:|:----------------------:|
+| remove_pq_only / remove_hybrid / force_legacy | true | true |
+| replace_downgrade_field | true | true |
+| replay_old_client_hello / replay_old_gateway_hello | true | true |
+
+这说明：即便降级保护字段被绕过，传输文本绑定与 Finished MAC 仍能兜底——**两层防护互为冗余**。
+
+**3）未检出的攻击与改进**：本实验中**无未检出项**。但需诚实指出防护边界（见 §8）：
+上述检测成立的前提是**攻击者不知道握手共享密钥**。若攻击者能**完整冒充网关**、
+与客户端独立跑完 DH/KEM（从而掌握共享密钥），则它可伪造一致的降级字段与 Finished MAC，
+本协议**无法**抵抗——根因是缺少**长期身份认证**。改进方案：为网关引入长期密钥，
+用后量子签名（如 ML-DSA / Dilithium）对 GatewayHello 与 transcript 签名，把
+`gateway_authenticator` 从“密钥确认”升级为“身份认证”，即可抵抗主动冒充。
+
 ---
 
 ## 7. 原语声明与可加分项
@@ -254,11 +299,15 @@ downgrade_protection_field = HMAC(early_key, 客户端 supported_algorithms || c
 
 1. **缺长期身份认证**：无证书/PSK，`gateway_authenticator` 只是密钥确认，**无法抵抗能完整
    冒充网关的主动中间人**（见 §4.4）。真实系统需引入 PKI 或预共享密钥。
-2. **缺抗重放机制**：未实现基于时间戳/计数器/服务器状态的重放检测（nonce 仅用于绑定，
-   不维护已见 nonce 集合）。任务四中“重放旧 ClientHello/GatewayHello”需额外状态才能完整防护。
+2. **重放检测靠密钥新鲜性、而非专门的抗重放状态**：实验 §6.4 中重放旧 ClientHello/GatewayHello
+   均被检出，但其根因是每次握手 nonce 与 DH/KEM 临时密钥都新鲜，重放导致双方密钥不一致而失败；
+   协议本身未维护“已见 nonce 集合”或时间戳窗口。若需在更复杂场景（如带长期密钥的会话恢复）下
+   防重放，仍需引入显式的计数器/时间戳/服务器状态。
 3. **签名/身份缺失而非原语缺失**：DH 与 KEM 均已是真实实现（X25519 + ML-KEM-768），
-   但协议未引入后量子**签名**（如 ML-DSA）做长期身份认证（见第 1 点）。
-4. **未实现群组密钥树（任务五）**：本交付聚焦任务二/三与任务六实验；群组扩展为后续工作。
+   但协议未引入后量子**签名**（如 ML-DSA）做长期身份认证（见第 1 点）。这也是 §6.4 指出的
+   降级防护边界——能抵抗篡改协商，但不能抵抗完整冒充网关的主动攻击。
+4. **未实现群组密钥树（任务五）**：本交付已覆盖任务二/三/四与任务六全部实验（含 6.4 降级攻击检测）；
+   群组密钥管理（任务五）为后续工作。
 5. **错误处理简化**：协商失败时网关直接关闭连接，客户端据连接中断判定失败，未定义专门的
    告警/错误消息类型。
 6. **单连接顺序模型**：`GatewayServer` 顺序处理连接、结果走队列；未做高并发优化（与本题的
