@@ -280,6 +280,50 @@ downgrade_protection_field = HMAC(early_key, 客户端 supported_algorithms || c
 用后量子签名（如 ML-DSA / Dilithium）对 GatewayHello 与 transcript 签名，把
 `gateway_authenticator` 从“密钥确认”升级为“身份认证”，即可抵抗主动冒充。
 
+### 6.5 实验四：动态群组密钥迁移（任务五，选做）
+
+**设计取舍**：Gateway 是可信 KDC（已与每个成员通过任务二握手得到 pairwise session key），
+故采用**对称密钥树（LKH，Logical Key Hierarchy）**而非公钥树（TreeKEM）。
+对称树的意义在于把成员变更时的 rekey 广播从 O(n) 降到 **O(log n)**，而非“让服务器不知道群钥”——
+KDC 本就知道全部密钥。公钥树是为“没有可信中心”的场景（如端到端群聊）设计的，本题不需要。
+模型：堆式二叉树，叶子密钥 `leaf_key = HKDF(session_key, epoch, "leaf")`，
+内部节点持随机 KEK，`group_key = 根密钥`；**成员离开时对其到根路径上的节点重新随机化**，
+保证离开者无法用旧密钥算出新 group_key（前向安全）。命令：`python main.py group`。
+
+测量（n = 8/16/32/64，每个 (n, mode) 各测 group_init / member_join / member_leave；
+group_init 时间含 n 次握手、member_join 含 1 次新成员握手、member_leave 为纯对称操作）：
+
+| n | mode | operation | time_ms | updated_nodes | broadcast_msgs | correct |
+|---|------|-----------|--------:|--------------:|---------------:|:-------:|
+| 8  | hybrid | group_init   |  72.2 | 7  | 14  | True |
+| 8  | hybrid | member_join  |   5.3 | 4  | 5   | True |
+| 8  | hybrid | member_leave |  0.01 | 3  | 5   | True |
+| 16 | hybrid | group_init   |  79.7 | 15 | 30  | True |
+| 16 | hybrid | member_join  |   5.1 | 5  | 6   | True |
+| 16 | hybrid | member_leave |  0.02 | 4  | 7   | True |
+| 32 | hybrid | group_init   | 157.9 | 31 | 62  | True |
+| 32 | hybrid | member_join  |   5.1 | 6  | 7   | True |
+| 32 | hybrid | member_leave |  0.05 | 5  | 9   | True |
+| 64 | hybrid | group_init   | 312.1 | 63 | 126 | True |
+| 64 | hybrid | member_join  |   5.4 | 7  | 8   | True |
+| 64 | hybrid | member_leave |  0.11 | 6  | 11  | True |
+
+> 完整三模式表见 `python main.py group` 输出 / `results/` 存档；上表取 hybrid 行示意。
+> legacy 的 group_init 显著更快（n=64 约 66 ms vs hybrid 312 ms），因其每个成员只做一次 X25519 握手。
+
+**分析（对应任务六 6.4 各条）**：
+1. **群组初始化时间**：随 n 线性增长（主导项是 n 次 pairwise 握手），且随模式变化
+   （hybrid/pq-only 因 ML-KEM 明显高于 legacy）。
+2. **成员加入更新时间**：约 1 次握手量级（含新成员握手），树操作本身可忽略。
+3. **成员离开更新时间**：纯对称操作，亚毫秒级，与模式无关。
+4. **更新节点数**：group_init = n−1（线性 7/15/31/63）；member_leave = log₂n（3/4/5/6）；
+   member_join = log₂(2n)（4/5/6/7）。
+5. **广播消息数**：group_init = 2(n−1)（14/30/62/126，线性）；member_leave = 2·log₂n−1（5/7/9/11，对数）。
+6. **group_key 一致性**：所有合法成员均算出相同 group_key（correct 全 True）。
+7. **离开成员无法计算新 group_key**：leave 后对被逐成员做 `member_cannot_compute` 校验，全部为真（前向安全成立）。
+8. **对数级增长**：member_join / member_leave 的更新节点数与广播消息数随 n 呈 **O(log n)**，
+   而 group_init 呈 O(n)——印证二叉密钥树把 rekey 开销从线性降到对数，这正是用树（而非“直接逐个分发”）的意义。
+
 ---
 
 ## 7. 原语声明与可加分项
@@ -306,8 +350,9 @@ downgrade_protection_field = HMAC(early_key, 客户端 supported_algorithms || c
 3. **签名/身份缺失而非原语缺失**：DH 与 KEM 均已是真实实现（X25519 + ML-KEM-768），
    但协议未引入后量子**签名**（如 ML-DSA）做长期身份认证（见第 1 点）。这也是 §6.4 指出的
    降级防护边界——能抵抗篡改协商，但不能抵抗完整冒充网关的主动攻击。
-4. **未实现群组密钥树（任务五）**：本交付已覆盖任务二/三/四与任务六全部实验（含 6.4 降级攻击检测）；
-   群组密钥管理（任务五）为后续工作。
+4. **群组密钥树为对称 LKH 简化模型（任务五）**：采用可信 KDC + 对称密钥树，已实现一致性与
+   离开前向安全（路径重随机化），并验证 O(log n) rekey 开销。但未做：成员加入时的后向安全严格化、
+   树的再平衡、并发成员变更、以及 TreeKEM 式的去中心化/抗泄露恢复（PCS）——这些属于更复杂的群组协议范畴。
 5. **错误处理简化**：协商失败时网关直接关闭连接，客户端据连接中断判定失败，未定义专门的
    告警/错误消息类型。
 6. **单连接顺序模型**：`GatewayServer` 顺序处理连接、结果走队列；未做高并发优化（与本题的
