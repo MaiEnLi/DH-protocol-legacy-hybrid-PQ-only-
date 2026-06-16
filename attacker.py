@@ -46,14 +46,14 @@ class Attacker:
     def __init__(self, gateway_host: str, gateway_port: int,
                  tamper: Optional[Dict[str, TamperFn]] = None,
                  record: Optional[Dict[str, bytes]] = None,
-                 host: str = "127.0.0.1") -> None:
+                 host: str = "127.0.0.1", listen_port: int = 0) -> None:
         self.gw_host = gateway_host
         self.gw_port = gateway_port
         self.tamper = tamper or {}
         self.record = record
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, 0))
+        self._sock.bind((host, listen_port))
         self._sock.listen(8)
         self.host, self.port = self._sock.getsockname()
         self._running = False
@@ -127,6 +127,32 @@ class Attacker:
         if self._thread:
             self._thread.join(timeout=2)
 
+    def serve_forever(self) -> None:
+        """前台阻塞运行（供独立进程的 mitm 子命令使用），每截获一次握手打印一行。"""
+        self._running = True
+        n = 0
+        try:
+            while True:
+                try:
+                    cconn, addr = self._sock.accept()
+                except OSError:
+                    break
+                n += 1
+                print(f"[MITM] #{n} 截获来自 {addr[0]}:{addr[1]} 的握手，转发至 "
+                      f"{self.gw_host}:{self.gw_port}（施加篡改：{list(self.tamper) or '无(透传)'}）",
+                      flush=True)
+                try:
+                    self._relay_once(cconn)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        cconn.close()
+                    except Exception:
+                        pass
+        except KeyboardInterrupt:
+            print("\n[MITM] 退出。")
+
 
 # --------------------------------------------------------------------------- #
 # 各类篡改策略
@@ -160,6 +186,29 @@ def tamper_replay(old_bytes: bytes) -> TamperFn:
     def f(_raw: bytes) -> bytes:
         return old_bytes
     return f
+
+
+# 独立 mitm 进程支持的（无需跨会话状态的）篡改策略
+LIVE_ATTACKS = {
+    "none": {},
+    "remove_pq_only": {"ClientHello": tamper_remove_alg("pq-only")},
+    "remove_hybrid": {"ClientHello": tamper_remove_alg("hybrid")},
+    "force_legacy": {"GatewayHello": tamper_force_legacy},
+    "replace_downgrade_field": {"GatewayHello": tamper_replace_downgrade},
+}
+
+
+def run_mitm_proxy(listen_host: str, listen_port: int,
+                   gateway_host: str, gateway_port: int, attack: str) -> None:
+    """作为独立进程运行的中间人代理：监听 listen_port，转发至真实网关，并施加指定篡改。
+    重放类攻击需跨会话录制，故仅在 attack 套件内提供；此处支持即时篡改类。"""
+    if attack not in LIVE_ATTACKS:
+        raise ValueError(f"未知攻击类型 {attack}；可选：{list(LIVE_ATTACKS)}")
+    proxy = Attacker(gateway_host, gateway_port, tamper=LIVE_ATTACKS[attack],
+                     host=listen_host, listen_port=listen_port)
+    print(f"[MITM] 监听 {proxy.host}:{proxy.port}  ->  网关 {gateway_host}:{gateway_port}")
+    print(f"[MITM] 攻击类型 = {attack}（Ctrl+C 退出）")
+    proxy.serve_forever()
 
 
 # --------------------------------------------------------------------------- #
@@ -368,7 +417,66 @@ def print_impersonation_report(result: Dict) -> None:
     print()
 
 
+# --------------------------------------------------------------------------- #
+# 双向认证（mutual pq-auth）：非法客户端被网关拒绝
+# --------------------------------------------------------------------------- #
+def run_mutual_auth_experiment(host: str = "127.0.0.1") -> Dict:
+    """
+    双向认证下，网关用预置的合法客户端公钥验证 ClientFinished 中的客户端签名。
+    对比三种客户端：合法（持正确长期密钥）、冒充（错误密钥）、未认证（不带签名）。
+    """
+    import negotiation as neg
+    from protocol import GatewayIdentity, GatewayServer, client_handshake
+
+    gw = GatewayIdentity.generate()             # 网关长期身份
+    client_legit = GatewayIdentity.generate()   # 合法客户端身份（网关 pin 其公钥）
+    impostor = GatewayIdentity.generate()       # 冒充者的非法长期身份
+
+    def run(client_id) -> bool:
+        srv = GatewayServer(host, 0, neg.ALL_MODES, identity=gw,
+                            client_pub=client_legit.pub, client_sig_scheme=client_legit.scheme).start()
+        res = client_handshake(host, srv.port, "hybrid", neg.ALL_MODES,
+                               expected_gw_pub=gw.pub, gw_sig_scheme=gw.scheme,
+                               client_identity=client_id)
+        try:
+            srv.results.get(timeout=5)
+        except Exception:
+            pass
+        srv.stop()
+        return res["success"]
+
+    return {
+        "legit": run(client_legit),       # 合法客户端 -> 应成功
+        "impostor": run(impostor),        # 错误长期密钥 -> 应被拒
+        "unauth": run(None),              # 不带签名 -> 应被拒
+    }
+
+
+def print_mutual_auth_report(result: Dict) -> None:
+    print("=" * 78)
+    print("双向认证（mutual pq-auth）：网关对客户端身份的认证")
+    print("=" * 78)
+    print("网关预置合法客户端公钥，验证 ClientFinished 中的客户端 ML-DSA 签名。\n")
+    print(f"{'客户端类型':<28}{'握手结果':<12}{'是否被网关接受'}")
+    print("-" * 60)
+    rows = [
+        ("合法客户端(正确长期密钥)", result["legit"]),
+        ("冒充客户端(错误长期密钥)", result["impostor"]),
+        ("未认证客户端(不带签名)", result["unauth"]),
+    ]
+    for name, ok in rows:
+        print(f"{name:<28}{('success' if ok else 'fail'):<12}{'接受' if ok else '拒绝'}")
+    print()
+    secure = result["legit"] and not result["impostor"] and not result["unauth"]
+    print(f"结论：仅持正确长期密钥的客户端被接受，冒充与未认证客户端均被拒绝 —— "
+          f"双向认证{'成立' if secure else '异常'}。")
+    print("代价：客户端额外一次 ML-DSA 签名、网关额外一次验签（各约数毫秒），")
+    print("      ClientFinished 增加约 3.3 KB（一枚 ML-DSA 签名）。")
+    print()
+
+
 if __name__ == "__main__":
     print_attack_report(run_attack_suite())
     run_defense_in_depth()
     print_impersonation_report(run_impersonation_experiment())
+    print_mutual_auth_report(run_mutual_auth_experiment())

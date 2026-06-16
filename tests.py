@@ -122,6 +122,18 @@ class TestPqAuthImpersonation(unittest.TestCase):
         self.assertTrue(by["pq-auth (ML-DSA signature)"]["detected"])
         self.assertTrue(res["overhead"]["legit_success"])
 
+    def test_mutual_auth_legit_succeeds(self):
+        r = run_handshake("hybrid", ALL, ALL, mutual=True)
+        self.assertTrue(r.success, "合法双向认证应握手成功")
+        self.assertEqual(r.client_session_key, r.gateway_session_key)
+
+    def test_mutual_auth_rejects_forged_client(self):
+        import attacker
+        res = attacker.run_mutual_auth_experiment()
+        self.assertTrue(res["legit"], "合法客户端应被接受")
+        self.assertFalse(res["impostor"], "冒充客户端应被拒绝")
+        self.assertFalse(res["unauth"], "未认证客户端应被拒绝")
+
 
 class TestGroupKeyTree(unittest.TestCase):
     """任务五：对称 LKH 树——一致性、前向安全、对数级开销。"""

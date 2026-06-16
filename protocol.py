@@ -52,6 +52,7 @@ from primitives import get_dh_scheme, get_kem_scheme, get_sig_scheme
 from wire import recv_msg, send_msg
 
 CONTEXT = b"hybrid-pq-migration-v1"
+CLIENT_AUTH_CTX = b"client-auth-v1"   # 双向认证：客户端签名的域分离上下文
 
 GATEWAY_ID = "gateway-1"
 CLIENT_ID = "client-1"
@@ -143,9 +144,12 @@ def _auth_bind(mode: str, algs: List[str], g_nonce: bytes, c_nonce: bytes) -> by
 # 网关侧：处理单个连接
 # --------------------------------------------------------------------------- #
 def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str],
-                              identity: Optional["GatewayIdentity"] = None) -> Dict:
+                              identity: Optional["GatewayIdentity"] = None,
+                              client_pub: Optional[bytes] = None,
+                              client_sig_scheme=None) -> Dict:
     """处理一次握手；返回网关侧结果字典。失败时关闭连接并返回 success=False。
-    identity 非空时启用 pq-auth：用网关长期私钥对握手签名（gateway_authenticator 为签名）。"""
+    identity 非空时启用 pq-auth：用网关长期私钥对握手签名（gateway_authenticator 为签名）。
+    client_pub 非空时启用双向认证：用预置的客户端公钥验证 ClientFinished 中的客户端签名。"""
     timer = OpTimer()
     dh, _ = get_dh_scheme()
     kem, _ = get_kem_scheme()
@@ -242,6 +246,15 @@ def gateway_handle_connection(conn: socket.socket, gateway_supported: List[str],
         return {"success": False, "selected_mode": mode, "warnings": nres.warnings,
                 "session_key": b"", "gateway_compute_ms": timer.total_ms(),
                 "gateway_ops": dict(timer.timings), "reason": "ClientFinished 校验失败（传输文本/降级篡改）"}
+    # 双向认证：用预置的客户端公钥验证客户端长期签名
+    if client_pub is not None:
+        with timer.time("sig_verify"):
+            ok = client_sig_scheme.verify(client_pub, CLIENT_AUTH_CTX + th1, cf.client_authenticator)
+        if not ok:
+            conn.close()
+            return {"success": False, "selected_mode": mode, "warnings": nres.warnings,
+                    "session_key": b"", "gateway_compute_ms": timer.total_ms(),
+                    "gateway_ops": dict(timer.timings), "reason": "客户端签名验证失败：身份不可信（疑似非法客户端）"}
     transcript.update(payload)
     with timer.time("transcript_hash"):
         th2 = transcript.digest()
@@ -273,6 +286,7 @@ def client_handshake(
     _skip_negotiation_checks: bool = False,
     expected_gw_pub: Optional[bytes] = None,
     gw_sig_scheme=None,
+    client_identity: Optional["GatewayIdentity"] = None,
 ) -> Dict:
     """
     发起一次握手；返回客户端侧结果字典（含通信开销与计算开销）。
@@ -399,7 +413,12 @@ def client_handshake(
         # 7) ClientFinished：携带 TH1，并对其做 MAC；发出后再把它喂入 transcript 得到 TH2。
         with timer.time("mac"):
             c_mac = hmac_sha256(cfk, _finished_bind(th1, mode_sel, gh.selected_algorithms, c_nonce, gh.gateway_nonce))
-        cf = ClientFinished(transcript_hash=th1, client_finished_mac=c_mac)
+        c_auth = b""
+        if client_identity is not None:
+            # 双向认证：客户端用其长期私钥对 (上下文 || TH1) 签名，供网关验证身份
+            with timer.time("sig_sign"):
+                c_auth = client_identity.scheme.sign(client_identity.priv, CLIENT_AUTH_CTX + th1)
+        cf = ClientFinished(transcript_hash=th1, client_finished_mac=c_mac, client_authenticator=c_auth)
         with timer.time("serialize"):
             cf_bytes = cf.serialize()
         n = send_msg(sock, cf_bytes)
@@ -458,9 +477,12 @@ class GatewayServer:
     """持久 TCP 服务端：循环 accept，每个连接跑一次握手，结果推入队列。"""
 
     def __init__(self, host: str, port: int, gateway_supported: List[str],
-                 identity: Optional["GatewayIdentity"] = None) -> None:
+                 identity: Optional["GatewayIdentity"] = None,
+                 client_pub: Optional[bytes] = None, client_sig_scheme=None) -> None:
         self.gateway_supported = gateway_supported
         self.identity = identity          # 非空则启用 pq-auth（网关对握手签名）
+        self.client_pub = client_pub      # 非空则启用双向认证（验证客户端签名）
+        self.client_sig_scheme = client_sig_scheme
         self.results: "Queue[Dict]" = Queue()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -478,7 +500,9 @@ class GatewayServer:
                 break
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
-                res = gateway_handle_connection(conn, self.gateway_supported, identity=self.identity)
+                res = gateway_handle_connection(conn, self.gateway_supported, identity=self.identity,
+                                                client_pub=self.client_pub,
+                                                client_sig_scheme=self.client_sig_scheme)
             except Exception as e:  # 任何异常都不应让服务器崩溃
                 res = {"success": False, "selected_mode": "failed", "warnings": [],
                        "session_key": b"", "gateway_compute_ms": 0.0,
@@ -572,20 +596,29 @@ def run_handshake(
     host: str = "127.0.0.1",
     mitm: Optional[Callable[[ClientHello], ClientHello]] = None,
     authenticate: bool = False,
+    mutual: bool = False,
 ) -> HandshakeResult:
     """
     单次握手编排：在临时端口拉起网关线程，客户端连 localhost 跑通四步，
     合并双方 metrics 后返回 HandshakeResult。
-    authenticate=True 时启用 pq-auth：网关生成长期 ML-DSA 身份并签名，
-    客户端用 pinned 公钥验证（演示对“真身份认证”的支持）。
+    authenticate=True 启用 pq-auth（网关身份认证）；mutual=True 在此基础上再启用双向认证
+    （客户端也持长期 ML-DSA 身份，网关用 pinned 客户端公钥验证）。
     """
-    identity = GatewayIdentity.generate() if authenticate else None
+    do_auth = authenticate or mutual
+    identity = GatewayIdentity.generate() if do_auth else None
     exp_pub = identity.pub if identity else None
     exp_scheme = identity.scheme if identity else None
-    server = GatewayServer(host, 0, gateway_supported_algs, identity=identity).start()
+
+    client_id = GatewayIdentity.generate() if mutual else None
+    cli_pub = client_id.pub if client_id else None
+    cli_scheme = client_id.scheme if client_id else None
+
+    server = GatewayServer(host, 0, gateway_supported_algs, identity=identity,
+                           client_pub=cli_pub, client_sig_scheme=cli_scheme).start()
     try:
         client = client_handshake(host, server.port, mode, client_supported_algs, mitm=mitm,
-                                  expected_gw_pub=exp_pub, gw_sig_scheme=exp_scheme)
+                                  expected_gw_pub=exp_pub, gw_sig_scheme=exp_scheme,
+                                  client_identity=client_id)
         try:
             gateway = server.results.get(timeout=5)
         except Exception:

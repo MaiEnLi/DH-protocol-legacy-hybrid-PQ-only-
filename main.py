@@ -183,6 +183,13 @@ def cmd_auth(args: argparse.Namespace) -> None:
         _print_primitives()
         print()
         attacker.print_impersonation_report(attacker.run_impersonation_experiment())
+        attacker.print_mutual_auth_report(attacker.run_mutual_auth_experiment())
+
+
+def cmd_mitm(args: argparse.Namespace) -> None:
+    import attacker
+    _print_primitives()
+    attacker.run_mitm_proxy(args.host, args.port, args.gateway_host, args.gateway_port, args.attack)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,6 +229,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     au = sub.add_parser("auth", help="创新扩展：pq-auth 后量子身份认证，冒充网关前后对比")
     au.set_defaults(func=cmd_auth)
+
+    m = sub.add_parser("mitm", help="独立进程：中间人代理（三进程实时演示用）")
+    m.add_argument("--host", default="127.0.0.1", help="代理监听地址")
+    m.add_argument("--port", type=int, default=9100, help="代理监听端口（客户端连这里）")
+    m.add_argument("--gateway-host", default="127.0.0.1")
+    m.add_argument("--gateway-port", type=int, default=9000, help="真实网关端口")
+    m.add_argument("--attack", default="force_legacy",
+                   choices=["none", "remove_pq_only", "remove_hybrid",
+                            "force_legacy", "replace_downgrade_field"])
+    m.set_defaults(func=cmd_mitm)
 
     return p
 
