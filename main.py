@@ -160,6 +160,15 @@ def cmd_experiment(args: argparse.Namespace) -> None:
         experiment.run_experiment(args.iterations)
 
 
+def cmd_attack(args: argparse.Namespace) -> None:
+    import attacker
+    with _save_output("attack"):
+        _print_primitives()
+        print()
+        attacker.print_attack_report(attacker.run_attack_suite())
+        attacker.run_defense_in_depth()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="简化版客户端—网关抗量子迁移握手协议")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -188,6 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("experiment", help="运行任务六全部实验")
     e.add_argument("--iterations", type=int, default=100)
     e.set_defaults(func=cmd_experiment)
+
+    a = sub.add_parser("attack", help="任务四：中间人降级攻击模拟与检测")
+    a.set_defaults(func=cmd_attack)
 
     return p
 

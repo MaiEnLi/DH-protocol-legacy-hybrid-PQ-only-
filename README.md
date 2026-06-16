@@ -37,7 +37,11 @@ python main.py client --host 127.0.0.1 --port 9000 --mode hybrid
 # 2) 基准测试（本进程内拉起网关线程，跑 N 次）
 python main.py bench --mode all --iterations 100
 
+# 3) 任务六全部实验（性能/正确性 + 协商兼容性 + 降级攻击检测）
+python main.py experiment --iterations 100
 
+# 4) 任务四：中间人降级攻击模拟与检测
+python main.py attack
 ```
 
 `client` 子命令参数：
@@ -62,9 +66,10 @@ messages.py       四种握手消息 dataclass + 确定性序列化/反序列化
 wire.py           4 字节大端长度前缀分帧；send_msg/recv_msg；字节统计
 negotiation.py    模式与算法协商、降级保护策略
 protocol.py       Client/Gateway 状态机；GatewayServer；run_handshake()
+attacker.py       任务四：中间人 socket 代理 + 降级攻击套件 + 纵深防御对比
 metrics.py        Metrics 数据结构、计时器、统计量（mean/median/stdev/min/max/p95）
-experiment.py     任务六实验 + bench 复用的多轮采集引擎
-main.py           子命令 gateway/client/bench/experiment 入口
+experiment.py     任务六实验（性能/正确性 + 协商兼容性 + 降级攻击检测）
+main.py           子命令 gateway/client/bench/experiment/attack 入口
 tests.py          单元测试
 REPORT.md         设计与实验报告
 ```

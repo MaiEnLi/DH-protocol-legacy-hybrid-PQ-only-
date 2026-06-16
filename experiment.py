@@ -241,6 +241,14 @@ def run_experiment_negotiation() -> List[Dict]:
     return rows
 
 
+def run_experiment_attack() -> None:
+    """实验 6.3：降级攻击检测（任务四）。"""
+    import attacker  # 延迟导入，避免循环
+    attacker.print_attack_report(attacker.run_attack_suite())
+    attacker.run_defense_in_depth()
+
+
 def run_experiment(iterations: int) -> None:
     run_experiment_perf(iterations)
     run_experiment_negotiation()
+    run_experiment_attack()

@@ -86,5 +86,23 @@ class TestNegotiation(unittest.TestCase):
         self.assertFalse(r.success)
 
 
+class TestMitmAttacks(unittest.TestCase):
+    """任务四：中间人代理对五种规定攻击 + 扩展攻击均应被检出。"""
+
+    def test_all_attacks_detected_and_no_false_positive(self):
+        import attacker
+        result = attacker.run_attack_suite()
+        # 无篡改基线应握手成功（代理透明，无误报）
+        self.assertTrue(result["baseline"]["success"], "无篡改透传应成功")
+        # 每种攻击都应被检测到
+        for row in result["rows"]:
+            self.assertTrue(row["detected"], f"攻击 {row['attack']} 未被检出")
+        # 至少覆盖题目要求的五种攻击
+        names = {r["attack"] for r in result["rows"]}
+        for required in ("remove_pq_only", "remove_hybrid", "force_legacy",
+                         "replace_downgrade_field", "replay_old_client_hello"):
+            self.assertIn(required, names)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
