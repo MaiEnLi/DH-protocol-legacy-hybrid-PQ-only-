@@ -248,7 +248,14 @@ def run_experiment_attack() -> None:
     attacker.run_defense_in_depth()
 
 
+def run_experiment_group() -> None:
+    """实验 6.4：动态群组密钥迁移（任务五）。"""
+    import group  # 延迟导入，避免循环
+    group.print_group_report(group.run_group_experiment())
+
+
 def run_experiment(iterations: int) -> None:
     run_experiment_perf(iterations)
     run_experiment_negotiation()
     run_experiment_attack()
+    run_experiment_group()

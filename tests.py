@@ -104,5 +104,41 @@ class TestMitmAttacks(unittest.TestCase):
             self.assertIn(required, names)
 
 
+class TestGroupKeyTree(unittest.TestCase):
+    """任务五：对称 LKH 树——一致性、前向安全、对数级开销。"""
+
+    def _keys(self, n):
+        import secrets
+        return [secrets.token_bytes(32) for _ in range(n)]
+
+    def test_build_and_consistency(self):
+        from group import LKHTree
+        t = LKHTree(16)
+        t.build(self._keys(16))
+        self.assertTrue(t.all_members_consistent(), "所有成员 group_key 应一致")
+
+    def test_leave_forward_secrecy(self):
+        """离开成员无法计算新 group_key，其余成员仍一致。"""
+        from group import LKHTree
+        t = LKHTree(16)
+        t.build(self._keys(16))
+        gk_old = t.group_key()
+        updated, msgs, evicted = t.leave(5)
+        self.assertNotEqual(t.group_key(), gk_old, "离开后 group_key 必须更新")
+        self.assertTrue(t.member_cannot_compute(evicted), "离开者不应能算出新 group_key")
+        self.assertTrue(t.all_members_consistent(), "其余成员应仍一致")
+
+    def test_logarithmic_update_cost(self):
+        """leave 更新节点数应等于 log2(n)。"""
+        from group import LKHTree
+        import math
+        for n in (8, 16, 32, 64):
+            t = LKHTree(n)
+            t.build(self._keys(n))
+            updated, msgs, _ = t.leave(0)
+            self.assertEqual(updated, int(math.log2(n)),
+                             f"n={n} 时 leave 更新节点数应为 log2(n)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

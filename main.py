@@ -169,6 +169,14 @@ def cmd_attack(args: argparse.Namespace) -> None:
         attacker.run_defense_in_depth()
 
 
+def cmd_group(args: argparse.Namespace) -> None:
+    import group
+    with _save_output("group"):
+        _print_primitives()
+        print()
+        group.print_group_report(group.run_group_experiment())
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="简化版客户端—网关抗量子迁移握手协议")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -200,6 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("attack", help="任务四：中间人降级攻击模拟与检测")
     a.set_defaults(func=cmd_attack)
+
+    gr = sub.add_parser("group", help="任务五：动态群组密钥迁移（LKH 树）实验")
+    gr.set_defaults(func=cmd_group)
 
     return p
 
