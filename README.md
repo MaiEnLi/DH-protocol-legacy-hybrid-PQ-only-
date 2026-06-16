@@ -45,6 +45,9 @@ python main.py attack
 
 # 5) 任务五：动态群组密钥迁移（LKH 树）实验
 python main.py group
+
+# 6) 创新扩展：pq-auth 后量子身份认证，冒充网关前后对比
+python main.py auth
 ```
 
 `client` 子命令参数：
@@ -63,13 +66,13 @@ python main.py group
 ## 文件结构
 
 ```text
-primitives.py     DH / KEM 抽象基类 + toy 实现 + 真实实现（X25519 / ML-KEM）
+primitives.py     DH / KEM / 签名 抽象基类 + 真实实现（X25519 / ML-KEM-768 / ML-DSA-65）+ toy 回退
 crypto_utils.py   HKDF-SHA256、HMAC-SHA256、Transcript、确定性序列化读写器
 messages.py       四种握手消息 dataclass + 确定性序列化/反序列化
 wire.py           4 字节大端长度前缀分帧；send_msg/recv_msg；字节统计
 negotiation.py    模式与算法协商、降级保护策略
 protocol.py       Client/Gateway 状态机；GatewayServer；run_handshake()
-attacker.py       任务四：中间人 socket 代理 + 降级攻击套件 + 纵深防御对比
+attacker.py       任务四：中间人 socket 代理 + 降级攻击套件 + 纵深防御对比 + 冒充网关/pq-auth 对比
 group.py          任务五：对称 LKH 群组密钥树 + 动态迁移开销实验
 metrics.py        Metrics 数据结构、计时器、统计量（mean/median/stdev/min/max/p95）
 experiment.py     任务六实验（性能/正确性 + 协商兼容性 + 降级攻击 + 群组迁移）

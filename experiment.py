@@ -254,8 +254,15 @@ def run_experiment_group() -> None:
     group.print_group_report(group.run_group_experiment())
 
 
+def run_experiment_auth() -> None:
+    """创新扩展：pq-auth 身份认证，冒充网关前后对比。"""
+    import attacker  # 延迟导入，避免循环
+    attacker.print_impersonation_report(attacker.run_impersonation_experiment())
+
+
 def run_experiment(iterations: int) -> None:
     run_experiment_perf(iterations)
     run_experiment_negotiation()
     run_experiment_attack()
     run_experiment_group()
+    run_experiment_auth()
