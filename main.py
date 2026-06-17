@@ -91,12 +91,23 @@ def _parse_algs(s: str) -> list:
 def cmd_gateway(args: argparse.Namespace) -> None:
     _print_primitives()
     supported = _parse_algs(args.algs)
-    server = GatewayServer(args.host, args.port, supported).start()
+    try:
+        server = GatewayServer(args.host, args.port, supported).start()
+    except OSError as e:
+        print(f"[网关] 启动失败：端口 {args.port} 可能已被占用（是否有旧网关仍在运行？）。"
+              f"请先关闭它或改用其他 --port。详情：{e}")
+        return
     print(f"[网关] 监听 {server.host}:{server.port}  支持模式={supported}")
     print("[网关] 等待客户端连接（Ctrl+C 退出）……")
+    import queue as _queue
     try:
         while True:
-            res = server.results.get()
+            # 带超时轮询：阻塞 get() 在 Windows 上无法被 Ctrl+C 唤醒，
+            # 用短超时让主线程定期醒来，从而能及时响应中断。
+            try:
+                res = server.results.get(timeout=0.5)
+            except _queue.Empty:
+                continue
             tag = "OK" if res.get("success") else "FAIL"
             print(f"[网关] 握手 {tag}  mode={res.get('selected_mode')}  "
                   f"compute={res.get('gateway_compute_ms', 0):.3f}ms  "
@@ -189,7 +200,11 @@ def cmd_auth(args: argparse.Namespace) -> None:
 def cmd_mitm(args: argparse.Namespace) -> None:
     import attacker
     _print_primitives()
-    attacker.run_mitm_proxy(args.host, args.port, args.gateway_host, args.gateway_port, args.attack)
+    try:
+        attacker.run_mitm_proxy(args.host, args.port, args.gateway_host, args.gateway_port, args.attack)
+    except OSError as e:
+        print(f"[MITM] 启动失败：端口 {args.port} 可能已被占用（是否有旧代理仍在运行？）。"
+              f"请先关闭它或改用其他 --port。详情：{e}")
 
 
 def build_parser() -> argparse.ArgumentParser:

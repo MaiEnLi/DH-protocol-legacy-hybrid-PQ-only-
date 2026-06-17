@@ -52,7 +52,14 @@ class Attacker:
         self.tamper = tamper or {}
         self.record = record
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 与网关同理：Windows 上独占端口，避免重复启动代理时端口共享、客户端连错。
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            try:
+                self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except OSError:
+                pass
+        else:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, listen_port))
         self._sock.listen(8)
         self.host, self.port = self._sock.getsockname()
