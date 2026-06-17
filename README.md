@@ -92,4 +92,3 @@ Client                                   Gateway
 共 4 条消息、2 个往返(RTT)
 ```
 
-详见 [REPORT.md](REPORT.md)。

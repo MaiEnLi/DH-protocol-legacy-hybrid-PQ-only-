@@ -485,7 +485,15 @@ class GatewayServer:
         self.client_sig_scheme = client_sig_scheme
         self.results: "Queue[Dict]" = Queue()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Windows 用 SO_EXCLUSIVEADDRUSE 独占端口：重复启动网关会当场报“端口已占用”，
+        # 而非像 SO_REUSEADDR 那样允许多个网关共享同一端口、导致客户端连错（僵尸网关抢答）。
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            try:
+                self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except OSError:
+                pass
+        else:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
         self._sock.listen(16)
         self.host, self.port = self._sock.getsockname()
